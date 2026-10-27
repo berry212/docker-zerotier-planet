@@ -13,7 +13,8 @@
     $('input.nickname-sync-name').each(function () { rows.set(this.name, this); });
 
     function status(input, message, failed) {
-      $(input).closest('td').find('.nickname-sync-status').text(message).css('color', failed ? '#b52b27' : '#555');
+      input.title = message;
+      input.setAttribute('aria-invalid', failed ? 'true' : 'false');
     }
     function receive(record) {
       var input = rows.get(record.nodeId);
@@ -65,26 +66,10 @@
           }
         }).always(function () { input.disabled = false; flush(input); });
     });
-    $('.nickname-sync-bind').on('click', function () {
-      var input = $(this).closest('td').find('input')[0];
-      request(input, 'POST', '/binding-code', {}).done(function (binding) {
-        // A prompt keeps the one-time secret out of the DOM and makes it easy to copy.
-        window.prompt('复制绑定码到 App（10 分钟内有效，仅使用一次；请确认该成员是你的设备）：', binding.code);
-        status(input, '绑定码已生成，10 分钟内有效。');
-      }).fail(function (xhr) {
-        status(input, (xhr.responseJSON && xhr.responseJSON.error.message) || '生成绑定码失败，请确认成员已授权。', true);
-      });
-    });
-    $('.nickname-sync-revoke').on('click', function () {
-      var input = $(this).closest('td').find('input')[0];
-      if (!window.confirm('撤销该设备的昵称同步凭证？重新连接需要生成新的绑定码。')) return;
-      request(input, 'DELETE', '/binding').done(function () { status(input, 'App 绑定已撤销。'); })
-        .fail(function () { status(input, '撤销失败，请重试。', true); });
-    });
     if (window.EventSource) {
       var source = new EventSource(base + '/events');
       source.addEventListener('nickname', function (event) { receive(JSON.parse(event.data)); });
-      source.addEventListener('revoked', function () { source.close(); });
+      source.addEventListener('removed', function () { source.close(); });
       window.addEventListener('pagehide', function () { source.close(); });
       // A bfcache restore must reconnect instead of showing a stale, disconnected page.
       window.addEventListener('pageshow', function (event) { if (event.persisted) window.location.reload(); });

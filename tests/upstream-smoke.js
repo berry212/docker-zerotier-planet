@@ -15,7 +15,7 @@ async function main() {
   const installer = require('../patch/nickname-sync/install');
   const appBefore = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
   const changed = installer.install(root);
-  assert.strictEqual(changed, appBefore.includes('nickname-sync:v1') ? 0 : 3);
+  assert.strictEqual(changed, appBefore.includes('nickname-sync:v2') ? 0 : 3);
   assert.strictEqual(installer.install(root), 0);
   const target = path.join(root, 'nickname-sync');
   fs.mkdirSync(target, {recursive: true});
@@ -48,7 +48,9 @@ async function main() {
   let html = pug.renderFile(path.join(root, 'views/network_detail.pug'), Object.assign(detail, {nicknameSyncCsrf: 'a'.repeat(64)}));
   assert(html.includes('nickname-sync-name'));
   assert(html.includes('data-version="1"'));
-  assert(html.includes('绑定 App'));
+  assert(!html.includes('绑定 App'));
+  assert(!html.includes('撤销绑定'));
+  assert(!html.includes('nickname-sync-status'));
   assert(html.includes('/nickname-sync/browser.js'));
   assert(html.includes('Chen &amp; &lt;desktop&gt;'));
   const extension = require(target);

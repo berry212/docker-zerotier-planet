@@ -154,16 +154,17 @@ sudo zerotier-cli peers
 
 ### App 昵称双向同步
 
-昵称同步扩展与 ztncui 共用管理端口：App 可以读取、修改自己的昵称，管理员也可以在成员页面改名，通过 SSE 实时通知双方。昵称按网络和节点分别保存，不需要改 ZeroTier 协议或重新生成 `planet`。
+昵称同步扩展与 ztncui 共用管理端口：App 使用 Network ID 和 Node ID 读取、修改昵称，管理员继续在原有 Member name 输入框改名，通过 SSE 实时通知双方。客户端接口免鉴权，不需要绑定、兑换或登录，管理页面没有新增操作按钮。昵称按网络和节点分别保存，不需要改 ZeroTier 协议或重新生成 `planet`。
 
 将本次修改后的完整代码上传到**目标服务器的原项目目录**，保留原来的 `data/`，然后执行 `./deploy.sh`。已有容器会自动备份管理端代码、安装扩展、重启并检查健康状态。此操作不更新基础镜像；失败时尝试回退代码。
 
 - [在目标服务器部署、升级和配置 HTTPS](docs/deployment.md)
 - [交给 App 开发者的 API 文档](docs/nickname-api.md)
-- 读取昵称：`GET /api/v1/networks/{networkId}/me/nickname`，需要设备 Bearer 凭证。
-- 读取同网络已授权成员昵称（服务版本 1.1.0 起）：`GET /api/v1/networks/{networkId}/members/nicknames`，沿用自己的设备凭证；也可用 `/members/{nodeId}/nickname` 查询单个成员。
-- 实时同步：`GET /api/v1/networks/{networkId}/me/events`。
-- 在成员行点击“绑定 App”，将一次性绑定码交给对应设备；App 兑换后获得自己的凭证，不使用管理员密码或 ZeroTier 控制器令牌。
+- 读取昵称：`GET /api/v1/networks/{networkId}/members/{nodeId}/nickname`。
+- 修改昵称：同一路径使用 `PATCH`，提交 `nickname` 和读取到的 `version`（字段名 `expectedVersion`）。
+- 批量读取已授权成员昵称：`GET /api/v1/networks/{networkId}/members/nicknames`。
+- 实时同步：`GET /api/v1/networks/{networkId}/members/{nodeId}/events`。
+- 以上客户端接口无需认证；只检查指定节点的成员授权状态，不验证请求来源。可按部署环境通过 ZeroTier 地址和防火墙限制接口访问范围。
 
 ### 数据目录与备份
 

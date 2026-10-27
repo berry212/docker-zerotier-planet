@@ -5,7 +5,26 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const MARKER = 'nickname-sync:v1';
+const MARKER = 'nickname-sync:v2';
+const LEGACY_MARKER = 'nickname-sync:v1';
+const INPUT = "              input.form-control.text.nickname-sync-name(type='text' name=member.id value=member.name data-version=member.nicknameVersion maxlength='128')";
+
+function upgradeLegacy(source, relative) {
+  let upgraded = once(source, LEGACY_MARKER, MARKER, 'legacy marker');
+  if (relative === 'controllers/networkController.js') {
+    upgraded = once(upgraded, 'nicknames.revoke(req.params.nwid, member.id, true)',
+      'nicknames.remove(req.params.nwid, member.id)', 'legacy member delete');
+  } else if (relative === 'views/network_detail.pug') {
+    const oldInput = "              input.form-control.nickname-sync-name(type='text' name=member.id value=member.name data-version=member.nicknameVersion maxlength='128')\n" +
+      "              button.btn.btn-default.btn-xs.nickname-sync-bind(type='button' style='margin-top: 5px') 绑定 App\n" +
+      "              |  \n" +
+      "              button.btn.btn-default.btn-xs.nickname-sync-revoke(type='button' style='margin-top: 5px') 撤销绑定\n" +
+      "              small.nickname-sync-status(style='display: block' role='status')";
+    upgraded = once(upgraded, oldInput, INPUT, 'legacy controls');
+    upgraded = once(upgraded, '#nickname-sync-settings(data-network=', '#nickname-sync-settings(style=\'display: none\' data-network=', 'legacy browser settings');
+  }
+  return upgraded;
+}
 
 function once(source, before, after, label) {
   if (source.split(before).length !== 2) throw new Error('Unsupported ztncui source: ' + label);
@@ -18,6 +37,7 @@ function plan(root) {
     const filename = path.join(root, relative);
     const original = fs.readFileSync(filename, 'utf8');
     if (original.includes(MARKER)) return {filename, original, patched: original};
+    if (original.includes(LEGACY_MARKER)) return {filename, original, patched: upgradeLegacy(original, relative)};
     let patched = original;
     if (relative === 'app.js') {
       patched = once(patched, "app.use('/', index);", "// " + MARKER + "\nrequire('./nickname-sync').install(app);\n\napp.use('/', index);", 'app routes');
@@ -33,7 +53,7 @@ function plan(root) {
       const end = patched.indexOf('  } else { // GET', start);
       if (start < 0 || end < 0) throw new Error('Unsupported ztncui source: member rename branch');
       patched = patched.slice(0, start) + "    } else if (Object.prototype.hasOwnProperty.call(req.body, 'name')) {\n      return require('../nickname-sync').handleLegacyRename(req, res);\n    }\n" + patched.slice(end);
-      patched = once(patched, 'storage.removeItem(member.id)', 'nicknames.revoke(req.params.nwid, member.id, true)', 'member delete');
+      patched = once(patched, 'storage.removeItem(member.id)', 'nicknames.remove(req.params.nwid, member.id)', 'member delete');
       patched = once(patched, 'name = await storage.getItem(member.id);', 'name = (await nicknames.get(req.params.nwid, member.id)).nickname;', 'delete confirmation');
       patched = patched.replace(/member\.name = await storage\.getItem\(member\.id\) \| '';/g,
         'member.name = (await nicknames.get(req.params.nwid, member.id)).nickname;');
@@ -43,15 +63,10 @@ function plan(root) {
       }
     } else {
       const oldHandler = "        $('.text').on('change', function() {\n          $.post(url, {'id': this.name, 'name': this.value});\n        });";
-      patched = once(patched, oldHandler, '        // ' + MARKER + ': names use the authenticated versioned API.', 'browser rename handler');
+      patched = once(patched, oldHandler, '        // ' + MARKER + ': names use the versioned admin API.', 'browser rename handler');
       const oldInput = "              input.form-control.text(type='text' name=member.id value=member.name)";
-      const newInput = "              input.form-control.nickname-sync-name(type='text' name=member.id value=member.name data-version=member.nicknameVersion maxlength='128')\n" +
-        "              button.btn.btn-default.btn-xs.nickname-sync-bind(type='button' style='margin-top: 5px') 绑定 App\n" +
-        "              |  \n" +
-        "              button.btn.btn-default.btn-xs.nickname-sync-revoke(type='button' style='margin-top: 5px') 撤销绑定\n" +
-        "              small.nickname-sync-status(style='display: block' role='status')";
-      patched = once(patched, oldInput, newInput, 'member input');
-      patched = once(patched, '  if (members !== undefined)', "  #nickname-sync-settings(data-network=network.nwid data-csrf=nicknameSyncCsrf)\n  script(src='/nickname-sync/browser.js' defer)\n\n  if (members !== undefined)", 'browser settings');
+      patched = once(patched, oldInput, INPUT, 'member input');
+      patched = once(patched, '  if (members !== undefined)', "  #nickname-sync-settings(style='display: none' data-network=network.nwid data-csrf=nicknameSyncCsrf)\n  script(src='/nickname-sync/browser.js' defer)\n\n  if (members !== undefined)", 'browser settings');
     }
     return {filename, original, patched};
   });

@@ -1,31 +1,27 @@
-# ZeroTier App 昵称同步 API v1
+# ZeroTier App 昵称双向同步 API（服务版本 2.0.0）
 
-这份文档可以直接交给负责 App 的开发者或 AI。服务部署方法见 [deployment.md](deployment.md)。
+可直接把本文交给 App 开发者或 AI。部署见 [deployment.md](deployment.md)。
 
-## 功能与身份模型
+## 功能与接入方式
 
-- 昵称属于 `(networkId, nodeId)`，不是操作系统用户名或 ZeroTier 用户账号。同一设备在不同网络可使用不同昵称。
-- App 和 ztncui 管理页面读写同一条记录。服务端是最终数据来源，App 本地只做缓存。
-- 从服务版本 **1.1.0** 起，设备凭证可读取同网络已授权成员的昵称；写操作仍只允许修改自己的昵称。已有设备 token 可继续使用，无须重新绑定。
-- 无须修改 ZeroTierOne、`planet`、`.moon`、`identity.secret` 或 `identity.public`。
-- 所有接口使用管理页面所在的服务地址，例如 `https://planet.example.com`。HTTP 监听端口默认是 3443，经反向代理提供 HTTPS；不是文件下载端口 3000。
-- App 需要配置 `baseUrl`；不能仅通过 Network ID 或 `planet` 自动发现接口地址。
-- 本机 ZeroTier 的认证令牌、服务端控制器令牌、下载密钥都不能用作此 API 的设备凭证。
-- 原生桌面/手机 App 可以直接请求。不启用跨站 CORS，也不支持浏览器原生 EventSource 在 URL 中传令牌。
+- App 昵称和管理页面原有 **Member name** 是同一条数据，按 `(networkId, nodeId)` 保存。
+- 客户端接口**免鉴权**：不需要登录、Authorization、设备凭证、绑定码或兑换操作。客户端从本机 ZeroTier 读取 Network ID 和 Node ID 后直接调用。
+- 管理员继续在原有 Member name 输入框修改名字；页面没有新增按钮、表单、昵称状态栏或绑定入口。原管理页面登录保持原样。
+- 服务端检查 URL 指定的节点确实存在且 `authorized=true`，然后允许读取、修改和订阅。这里检查的是目标节点的入网状态，**不证明 HTTP 请求来自该节点**；知道 ID 且能访问 API 的调用者同样能修改昵称。如果希望访问范围仅限已入网设备，应通过 ZeroTier 网络地址和防火墙限制接口来源。
+- 不修改 ZeroTier 协议、`planet`、`.moon` 或设备身份文件。客户端另外配置服务端 `baseUrl`，例如 `https://planet.example.com` 或服务器可达的 ZeroTier 地址；不能仅凭 Network ID 自动发现 HTTP 地址。
+- HTTP 端口沿用管理页面，默认 `3443`，不是文件下载端口 `3000`。使用 HTTPS 域名时填反向代理的地址。
 
-## App 实现顺序
+## 客户端实现顺序
 
-1. 从本机 ZeroTier 获取自己的 10 位十六进制节点 ID，以及所选网络的 16 位 Network ID，统一使用小写。
-2. 用户在管理页面对应成员行点击“绑定 App”。成员必须已授权；管理员应先核实该行确实是用户的设备。
-3. 用户把一次性绑定码输入 App，App 调用兑换接口。绑定码代表管理员授予的访问权限，不能公开分享。
-4. 校验兑换响应里的 `nodeId` 和 `networkId` 与本机所选设备/网络一致。若不一致，不保存凭证，提示用户重新获取正确绑定码。
-5. 将设备 `token` 保存在系统凭据存储中，缓存键使用 `(baseUrl, networkId, nodeId)`，不要写进日志或提交仓库。每次重新绑定时，以兑换响应覆盖旧缓存和版本（成员删除后重新加入时版本可能重新开始）。
-6. 启动、恢复前台和断线重连时 GET 自己的昵称。在线时建立 SSE，接收自己的昵称修改。加载或刷新网络成员列表时，使用下面的批量成员昵称接口，按 `nodeId` 与 App 的成员列表关联。
-7. 用户主动修改时 PATCH，带当前 `version`；成功后更新缓存。不要周期性上传本地缓存，不要收到推送后再自动回写。
-8. 退出前台或退出 App 时按平台需要关闭 SSE；重连使用带随机抖动的指数退避（例如 1～30 秒上限）。
-9. `401` 停止自动重试并提示重新绑定；`403` 提示检查网络成员授权；`503` 等待服务恢复；`409` 按下面的冲突规则处理。
+1. 获取本机的 10 位小写十六进制 `nodeId` 和所选网络的 16 位 `networkId`。
+2. 启动、切回前台或联网恢复时 GET 昵称，保存服务端返回的 `nickname` 和 `version`。缓存按 `(baseUrl, networkId, nodeId)` 区分。
+3. 建立该节点的 SSE 连接。管理员修改 Member name 后，收到 `nickname` 事件，更新 App 显示和本地缓存。
+4. 用户主动修改昵称时 PATCH，携带已知 `version` 作为 `expectedVersion`。成功响应更新本地值，服务端同时通知管理页面，页面原输入框实时更新。
+5. **不要定时上传本地缓存，不要收到 SSE 后再次回写。**自动同步只读；只有用户主动编辑时提交，避免互相覆盖和循环更新。
+6. 收到 `409` 时保留用户草稿，显示响应里的最新 `current`，由用户确认是否以新版本重提；不能自动覆盖管理员的新修改。
+7. 成员列表显示其他设备名字时，批量 GET 成员昵称，按 `nodeId` 匹配设备。空昵称以节点 ID 作为显示后备值，不把后备文字写回服务端。
 
-App 退出或离线时不会收到推送，下次启动/联网会获取最新值。后台策略由客户端平台决定。
+App 离线/关闭期间不接收推送；下次启动或重连获取最新状态。会员移除后重新加入时，清理该节点旧版本缓存并重新 GET。
 
 ## 1. 健康检查
 
@@ -33,52 +29,19 @@ App 退出或离线时不会收到推送，下次启动/联网会获取最新值
 GET /api/v1/nickname-sync/health
 ```
 
-无须认证，成功 `200`：
+成功 `200`：
 
 ```json
-{"status":"ok","version":"1.1.0"}
+{"status":"ok","version":"2.0.0"}
 ```
 
-## 2. 兑换一次性绑定码
+## 2. 获取指定成员昵称
 
 ```http
-POST /api/v1/device-bindings/redeem
-Content-Type: application/json
-
-{"code":"管理页面生成的64位小写十六进制绑定码"}
+GET /api/v1/networks/{networkId}/members/{nodeId}/nickname
 ```
 
-成功 `201`：
-
-```json
-{
-  "token": "64位小写十六进制设备凭证",
-  "networkId": "00ed8fb92f0e3547",
-  "nodeId": "79d0575f06",
-  "expiresAt": "2027-01-25T08:00:00.000Z",
-  "nickname": {
-    "networkId": "00ed8fb92f0e3547",
-    "nodeId": "79d0575f06",
-    "nickname": "陈的电脑",
-    "version": 1,
-    "updatedAt": "2026-10-27T08:00:00.000Z",
-    "updatedBy": "migration"
-  }
-}
-```
-
-上面的日期仅为格式示例。响应中外层 `nickname` 是完整记录对象。
-
-绑定码有效期 10 分钟，单次使用；同一成员生成新码后旧码作废。兑换新码会撤销该成员之前的设备凭证。设备凭证有效期 90 天，到期需重新绑定。请求超时导致不确定是否兑换成功时，可以尝试使用已收到的凭证；若没有收到凭证，重新生成绑定码，不反复兑换旧码。
-
-## 3. 获取自己的昵称
-
-```http
-GET /api/v1/networks/{networkId}/me/nickname
-Authorization: Bearer <token>
-```
-
-节点身份从 token 确定，调用方不能指定其他节点 ID。成功 `200`：
+**无认证请求头。**成功 `200`：
 
 ```json
 {
@@ -91,110 +54,36 @@ Authorization: Bearer <token>
 }
 ```
 
-字段说明：`updatedBy` 为 `admin`、`device`、`migration`，未设置时为 `null`；空昵称为 `""`，初始版本可为 0，初始 `updatedAt` 可为 `null`。空昵称由 App 自行显示节点 ID 等占位文字，不能把占位文字自动写回服务端。
-
-响应提供 `ETag`，例如 `"nickname-3"`。可选地在下次 GET 添加 `If-None-Match: "nickname-3"`，未变化时返回 `304` 且没有 JSON 响应体。普通 GET 不带该头也完全支持。
-
-```bash
-curl 'https://planet.example.com/api/v1/networks/00ed8fb92f0e3547/me/nickname' \
-  -H "Authorization: Bearer $DEVICE_TOKEN"
-```
-
-## 3A. 批量获取同网络成员昵称（1.1.0 新增）
-
-```http
-GET /api/v1/networks/{networkId}/members/nicknames
-Authorization: Bearer <token>
-```
-
-使用绑定到该网络的**设备凭证**，无须管理员 Session、密码或控制器令牌。调用设备必须仍是该网络的已授权成员，服务端会在每次查询时校验。不能使用此 token 查询另一个网络。
-
-成功 `200`：
-
-```json
-{
-  "networkId": "00ed8fb92f0e3547",
-  "members": [
-    {
-      "networkId": "00ed8fb92f0e3547",
-      "nodeId": "79d0575f06",
-      "nickname": "陈的电脑",
-      "version": 3,
-      "updatedAt": "2026-10-27T08:10:00.000Z",
-      "updatedBy": "admin"
-    },
-    {
-      "networkId": "00ed8fb92f0e3547",
-      "nodeId": "d484a54ba7",
-      "nickname": "",
-      "version": 0,
-      "updatedAt": null,
-      "updatedBy": null
-    }
-  ]
-}
-```
-
-- `members` 包含该网络当前已授权成员，**包含调用设备自身和离线成员**，按 `nodeId` 升序排列。设备不需要安装 App 或兑换 token 才能出现在列表中。
-- 未授权、已删除的成员，以及其他网络/仅残留在昵称存储中的记录，不会返回。
-- 昵称来自与管理页面相同的存储，未迁移的旧 ztncui 昵称会自动读取并迁移；不要求管理员先打开成员页面。
-- 未设置昵称仍返回记录，`nickname` 为 `""`。App 应使用 `nodeId` 作为显示后备值，不能把未知昵称当作设备离线或不存在。
-- App 用 `nodeId` 关联 ZeroTier 成员/peer 信息，**不要按数组下标、IP 或昵称匹配设备**。此接口不提供 IP、在线状态、认证凭据或用户名账号信息。
-- 可保存响应 `ETag`，下次 GET 使用 `If-None-Match`；成员昵称、授权或成员列表发生变化时 ETag 会变化，未变化返回 `304`（无响应体）。每次仍验证调用者权限。
-- 列表是请求时的快照，不是全网络的事务快照。成员列表刷新时重新拉取；本接口没有成员昵称的全网 SSE。现有 `/me/events` **仍然只推送调用设备自己的昵称**，不能用它判断其他成员是否改名。
+- `updatedBy` 为 `admin`、`device`、`migration` 或 `null`。`device` 表示从客户端接口提交，不是设备身份验证结果。
+- 未设置昵称时返回 `nickname: ""`、`version: 0`、`updatedAt: null`、`updatedBy: null`。
+- 可保存响应 `ETag`，例如 `"nickname-3"`，下次 GET 传 `If-None-Match: "nickname-3"`；未变化返回 `304`，无 JSON 响应体。
 
 ```bash
-curl 'https://planet.example.com/api/v1/networks/00ed8fb92f0e3547/members/nicknames' \
-  -H "Authorization: Bearer $DEVICE_TOKEN"
+curl 'https://planet.example.com/api/v1/networks/00ed8fb92f0e3547/members/79d0575f06/nickname'
 ```
 
-## 3B. 查询指定同网络成员昵称（1.1.0 新增）
+## 3. 修改指定成员昵称
 
 ```http
-GET /api/v1/networks/{networkId}/members/{nodeId}/nickname
-Authorization: Bearer <token>
-```
-
-同样使用调用者自己的设备 token，不需要目标成员的 token。成功 `200` 返回单条完整记录：
-
-```json
-{
-  "networkId": "00ed8fb92f0e3547",
-  "nodeId": "d484a54ba7",
-  "nickname": "办公室电脑",
-  "version": 2,
-  "updatedAt": "2026-10-27T08:20:00.000Z",
-  "updatedBy": "device"
-}
-```
-
-目标成员不在该网络、已删除或未授权时，返回 `404` 和 `error.code: "member_not_found"`。调用者 token 失效返回 `401`；调用者不再授权或 token 属于其他网络返回 `403`。此路径只支持 GET，不能通过它修改其他成员昵称。
-
-## 4. 修改自己的昵称
-
-```http
-PATCH /api/v1/networks/{networkId}/me/nickname
-Authorization: Bearer <token>
+PATCH /api/v1/networks/{networkId}/members/{nodeId}/nickname
 Content-Type: application/json
 
 {"nickname":"陈的笔记本","expectedVersion":3}
 ```
 
-成功 `200` 返回完整昵称记录，新版本为 4，`updatedBy` 为 `device`。内容与当前值相同则不递增版本。
+成功 `200` 返回完整昵称记录，新版本为 4，`updatedBy` 为 `device`。保存后会发送 SSE 事件，管理页面自动更新。内容与当前值相同不递增版本。
 
-- 昵称会去除首尾空白并转换为 Unicode NFC。
-- 最多 64 个 Unicode 码点，支持中文和 emoji；禁止控制字符及双向文本控制字符。
-- 空字符串表示清除昵称。
-- `expectedVersion` 必须为非负整数；不能省略、传字符串或自行使用本地时间代替。
+- `expectedVersion` 是 GET/SSE 返回的版本，必须为非负整数，不能省略、传字符串或用时间戳代替。它用于防止旧缓存覆盖新昵称，不是认证凭据。
+- 昵称去掉首尾空白并转换为 Unicode NFC，最多 64 个 Unicode 码点，支持中文和 emoji，禁止控制字符和双向文本控制字符。
+- `nickname: ""` 表示清除昵称。
 
 ```bash
-curl -X PATCH 'https://planet.example.com/api/v1/networks/00ed8fb92f0e3547/me/nickname' \
-  -H "Authorization: Bearer $DEVICE_TOKEN" \
+curl -X PATCH 'https://planet.example.com/api/v1/networks/00ed8fb92f0e3547/members/79d0575f06/nickname' \
   -H 'Content-Type: application/json' \
   --data '{"nickname":"陈的笔记本","expectedVersion":3}'
 ```
 
-发生并发修改时返回 `409`：
+管理员已修改过名字时，旧请求返回 `409`：
 
 ```json
 {
@@ -202,7 +91,7 @@ curl -X PATCH 'https://planet.example.com/api/v1/networks/00ed8fb92f0e3547/me/ni
   "current": {
     "networkId":"00ed8fb92f0e3547",
     "nodeId":"79d0575f06",
-    "nickname":"管理员设置的昵称",
+    "nickname":"管理员的新名字",
     "version":4,
     "updatedAt":"2026-10-27T08:11:00.000Z",
     "updatedBy":"admin"
@@ -210,17 +99,14 @@ curl -X PATCH 'https://planet.example.com/api/v1/networks/00ed8fb92f0e3547/me/ni
 }
 ```
 
-App 更新已知服务端值，保留用户未提交的编辑并提示冲突。只有用户确认再次修改后，才以新版本重发；不要静默重试覆盖管理员修改。
-
-## 5. SSE 实时同步
+## 4. SSE 接收管理员改名
 
 ```http
-GET /api/v1/networks/{networkId}/me/events
-Authorization: Bearer <token>
+GET /api/v1/networks/{networkId}/members/{nodeId}/events
 Accept: text/event-stream
 ```
 
-成功 `200`，`Content-Type: text/event-stream`。连接建立后先发送当前快照，以后在昵称变化时推送相同格式的记录：
+无需 Authorization、Cookie 或兑换。连接建立后先发送当前快照，以后在名字改变时推送完整记录：
 
 ```text
 event: nickname
@@ -228,50 +114,60 @@ data: {"networkId":"00ed8fb92f0e3547","nodeId":"79d0575f06","nickname":"陈的�
 
 ```
 
-- UTF-8 数据流；按 SSE 规范解析，不能假设一次网络读取恰好是一条消息，也不能逐块单独解码 UTF-8。
-- 大约每 25 秒发送 `: heartbeat` 注释，无须展示或回写。服务端同时复查成员授权和凭证有效性。
-- 接收到 `nickname` 时，只应用当前网络/节点且版本不低于已知版本的数据。若正在编辑，保留编辑草稿，提交时仍使用编辑开始时的版本，以便发现冲突。
-- 断线后重新 GET 并建立 SSE；新连接总会发送最新快照。没有事件历史补发，也不依赖 `Last-Event-ID`。
-- 管理员撤销绑定、新绑定替换旧凭证时，发送 `event: revoked` 后断开；成员授权变化最迟在下一次心跳发现。数据为 `{"code":"invalid_token"}` 或 `{"code":"membership_required"}`。停止盲目重连，提示处理授权/重新绑定。
-- 控制器临时不可用时，发送 `event: unavailable`（例如 `{"code":"controller_unavailable"}`）后断开，可退避重试。
-- 每个设备凭证最多 4 条连接，整个进程最多 1024 条；超出返回 `429`。每个 App 网络实例保持一条连接即可。
-- 原生浏览器 `EventSource` 无法设置 `Authorization`。App 应使用支持请求头的 SSE 库，或使用 `fetch` 流式读取；不要把 token 放入 query string。
-
-调试：
+- 支持原生 `EventSource`、SSE 库或原生 HTTP 流读取；网页跨域访问仍需同源代理或客户端原生网络层，服务器不启用跨域 CORS。
+- 按 SSE 协议和 UTF-8 流解析；一次网络读取可能只包含半条消息或半个中文字符。
+- 大约每 25 秒发送 `: heartbeat` 注释，并复查目标成员是否仍授权。等待时不持续占用 CPU。
+- 授权取消、成员删除时，发送 `event: removed`，数据为 `{"code":"membership_required"}`，随后断开。停止重连，提示检查成员授权。管理页面删除成员时会主动关闭其连接；其他控制器变更最迟在下一次心跳发现。
+- 控制器不可用时，发送 `event: unavailable`（例如 `{"code":"controller_unavailable"}`）后断开，可指数退避重试。
+- 断线后重新 GET 并建立 SSE，新连接总会发送最新快照，不提供事件历史补发，也不依赖 `Last-Event-ID`。
+- 只订阅 URL 指定成员的昵称。其他成员列表是批量 GET 的快照，在成员列表刷新时重新获取。
+- 每个网络/节点最多 4 条 SSE 连接，整个进程最多 1024 条。退出 App/页面时关闭连接，重连采用带随机抖动的指数退避。
 
 ```bash
-curl -N 'https://planet.example.com/api/v1/networks/00ed8fb92f0e3547/me/events' \
-  -H "Authorization: Bearer $DEVICE_TOKEN" \
-  -H 'Accept: text/event-stream'
+curl -N 'https://planet.example.com/api/v1/networks/00ed8fb92f0e3547/members/79d0575f06/events'
 ```
 
-## 6. 错误格式
+## 5. 批量查询网络成员昵称
+
+```http
+GET /api/v1/networks/{networkId}/members/nicknames
+```
+
+无需认证。成功 `200`：
 
 ```json
-{"error":{"code":"invalid_token","message":"Device token is invalid, revoked or expired"}}
+{
+  "networkId":"00ed8fb92f0e3547",
+  "members":[
+    {"networkId":"00ed8fb92f0e3547","nodeId":"79d0575f06","nickname":"陈的电脑","version":4,"updatedAt":"2026-10-27T08:11:00.000Z","updatedBy":"admin"},
+    {"networkId":"00ed8fb92f0e3547","nodeId":"d484a54ba7","nickname":"","version":0,"updatedAt":null,"updatedBy":null}
+  ]
+}
 ```
 
-| HTTP 状态 | 常见 code | App 行为 |
+列表包括指定网络当前已授权的成员和离线设备，按 `nodeId` 排序；未授权、已删除、其他网络及仅残留在存储中的记录不返回。旧 ztncui 名字自动按需迁移，不要求管理员先打开页面。接口不提供 IP、在线状态、登录账号信息；用 `nodeId` 与本地成员/peer 数据关联。
+
+支持 `ETag` / `If-None-Match`，未变化返回 `304`；昵称、成员授权或成员列表变化时 ETag 会变化。
+
+## 错误格式
+
+```json
+{"error":{"code":"membership_required","message":"Device must be an authorized member of this network"}}
+```
+
+| 状态 | code | 处理 |
 | --- | --- | --- |
-| 400 | `invalid_id` / `invalid_nickname` / `invalid_version` / `invalid_json` | 修正参数，不自动重试 |
-| 401 | `invalid_token` / `invalid_binding_code` | 重新绑定或获取新绑定码 |
-| 403 | `wrong_network` / `membership_required` | 检查当前网络和成员授权 |
-| 404 | `member_not_found` | 目标成员不存在、已删除或未授权，移除该昵称缓存 |
-| 409 | `version_conflict` | 使用 `current` 展示最新值，由用户决定是否重改 |
+| 400 | `invalid_id` / `invalid_nickname` / `invalid_version` / `invalid_json` | 修正参数 |
+| 403 | `membership_required` | URL 指定成员不存在、已删除或未授权，检查 Network ID 和 Node ID |
+| 409 | `version_conflict` | 使用 `current` 展示最新值，用户确认后重提 |
 | 413 | `body_too_large` | 缩小请求体 |
-| 429 | `too_many_streams` | 关闭多余连接，退避重连 |
-| 503 | `controller_unavailable` | 退避重试，不覆盖本地草稿 |
+| 429 | `too_many_streams` | 关闭多余 SSE 连接，退避重试 |
+| 503 | `controller_unavailable` | 等待控制器恢复后重试，保留草稿 |
 
-## 管理端接口（App 不应使用）
+## 管理页面与旧版本升级
 
-沿用 ztncui 的管理员登录 Session；写操作还要求 `X-Nickname-CSRF`。登录后 GET `/api/v1/admin/session` 获取 `csrfToken`。权限沿用现有 ztncui 的管理权限模型。
-
-| 方法 | 地址 | 用途 |
-| --- | --- | --- |
-| GET | `/api/v1/admin/networks/{networkId}/members/{nodeId}/nickname` | 读取成员昵称 |
-| PATCH | 同上 | `{"nickname":"...","expectedVersion":3}` |
-| POST | `/api/v1/admin/networks/{networkId}/members/{nodeId}/binding-code` | 生成绑定码 |
-| DELETE | `/api/v1/admin/networks/{networkId}/members/{nodeId}/binding` | 撤销绑定及未兑换绑定码 |
-| GET | `/api/v1/admin/networks/{networkId}/events` | 该网络的昵称 SSE，使用 Session Cookie |
-
-服务端数据保存在 `/app/config/nickname-sync.json`。当前实现是单进程内串行事务、原子文件替换与 fsync，无额外数据库或 npm 运行依赖；适合当前单容器部署。不要让多个进程/容器同时写同一文件。原 `etc/storage` 昵称按需迁移到每个网络，旧存储保留作兼容备份，之后不再作为已迁移记录的写入目标。
+- 管理页面只保留原有 Member name 输入框。后台沿用原登录 Session，写操作使用隐藏的 CSRF 值；这些不是客户端接口的接入条件，不增加管理员交互步骤。
+- 管理端内部接口仍为 `/api/v1/admin/networks/{networkId}/members/{nodeId}/nickname`（GET/PATCH）和 `/api/v1/admin/networks/{networkId}/events`（SSE），供原页面使用。
+- 版本 2.0.0 移除绑定码生成/兑换/撤销接口，以及依赖设备凭证的 `/me/nickname`、`/me/events`。客户端改用本文带 `nodeId` 的地址，不发送 token。
+- `./deploy.sh --update` 会迁移已打过 v1 补丁的页面，去掉旧按钮和状态栏，保留现有名字、版本和管理员登录信息。旧绑定数据会清空；数据文件保留兼容结构，便于代码回退。
+- `/app/config/nickname-sync.json` 使用单进程串行写入、原子文件替换与 fsync；不增加 npm 运行依赖。不要让多个进程/容器同时写同一文件。

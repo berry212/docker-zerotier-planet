@@ -60,7 +60,7 @@ if (args[0] === 'exec') {
   if (args[0] === 'node' && args[1] === '-e') {
     const app = fs.readFileSync(root + '/app/ztncui/src/app.js', 'utf8');
     const installed = fs.existsSync(root + '/app/ztncui/src/nickname-sync/index.js');
-    process.exit(process.env.MOCK_HEALTH_FAIL === '1' || !installed || !app.includes('nickname-sync:v1') ? 1 : 0);
+    process.exit(process.env.MOCK_HEALTH_FAIL === '1' || !installed || !app.includes('nickname-sync:v2') ? 1 : 0);
   }
   const result = cp.spawnSync(args[0], args.slice(1).map(mapped), {stdio: 'inherit'});
   process.exit(result.status === null ? 1 : result.status);
@@ -107,7 +107,9 @@ test('running deploy.sh automatically updates an existing service without pullin
   try {
     assert.equal(state.result.status, 0, state.result.stdout + state.result.stderr);
     assert.match(state.result.stdout, /昵称同步服务已更新/);
-    assert.match(fs.readFileSync(path.join(state.src, 'app.js'), 'utf8'), /nickname-sync:v1/);
+    assert.match(fs.readFileSync(path.join(state.src, 'app.js'), 'utf8'), /nickname-sync:v2/);
+    const view = fs.readFileSync(path.join(state.src, 'views/network_detail.pug'), 'utf8');
+    assert(!/nickname-sync-bind|nickname-sync-revoke|nickname-sync-status/.test(view));
     assert.equal(fs.existsSync(path.join(state.src, 'nickname-sync/index.js')), true);
     assert.equal(fs.readFileSync(path.join(state.root, 'var/lib/zerotier-one/identity.secret'), 'utf8'), 'existing-private-identity');
     assert.equal(fs.readFileSync(path.join(state.root, 'app/config/ip_addr4'), 'utf8'), '203.0.113.10');

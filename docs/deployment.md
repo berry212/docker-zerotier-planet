@@ -28,7 +28,7 @@ git merge --ff-only berry212/master
 如果使用本次提供的发布包，在开发电脑执行（替换服务器地址和用户名）：
 
 ```bash
-scp dist/zerotier-nickname-sync-1.1.0.tar.gz root@SERVER_IP:/tmp/
+scp dist/zerotier-nickname-sync-2.0.0.tar.gz root@SERVER_IP:/tmp/
 ```
 
 发布包包含代码和文档，不包含开发依赖、Git 历史、任何 `data/` 或凭据。
@@ -56,7 +56,7 @@ docker start myztplanet
 解压代码包到当前目录，然后执行：
 
 ```bash
-tar -xzf /tmp/zerotier-nickname-sync-1.1.0.tar.gz --strip-components=1
+tar -xzf /tmp/zerotier-nickname-sync-2.0.0.tar.gz --strip-components=1
 chmod +x deploy.sh
 ./deploy.sh
 ```
@@ -91,7 +91,7 @@ CONTAINER_NAME=你的容器名称 ./deploy.sh --update
 ```bash
 ssh root@SERVER_IP
 mkdir -p /opt
-tar -xzf /tmp/zerotier-nickname-sync-1.1.0.tar.gz -C /opt
+tar -xzf /tmp/zerotier-nickname-sync-2.0.0.tar.gz -C /opt
 cd /opt/docker-zerotier-planet
 chmod +x deploy.sh
 ./deploy.sh --install
@@ -107,7 +107,7 @@ ZEROTIER_DATA_PATH=/srv/zerotier ./deploy.sh --install
 
 如果已有数据但容器已删除，确保代码放回原项目目录（或正确设置 `ZEROTIER_DATA_PATH`），再运行 `--install`；检测到已有 `one/` 数据时使用 `config/` 恢复容器，不重新生成身份。备份不能省略。
 
-## 3. 验证和绑定 App
+## 3. 验证双向同步
 
 使用实际管理端口，默认 3443：
 
@@ -119,19 +119,19 @@ docker logs --tail 100 myztplanet
 预期健康响应：
 
 ```json
-{"status":"ok","version":"1.1.0"}
+{"status":"ok","version":"2.0.0"}
 ```
 
-打开管理页面并强制刷新，在网络成员昵称下应看到“绑定 App”和“撤销绑定”。
+打开管理页面并强制刷新，继续使用原有 **Member name** 输入框。没有新增按钮；如果旧版本曾显示绑定/撤销按钮，本次更新会自动移除。
 
 1. 确认设备 Member ID，并勾选 Authorized。
-2. 在该设备行点击“绑定 App”，把绑定码私下提供给设备用户。
-3. App 调用兑换接口，保存设备凭证。
-4. 在管理页面修改昵称，检查 App 收到 SSE 更新；在 App 改名，检查管理页面实时更新。
+2. App 配置服务端地址和自己的 Network ID / Node ID，直接 GET `/api/v1/networks/{networkId}/members/{nodeId}/nickname`，不需要任何绑定、兑换或认证请求头。
+3. App 建立 `/api/v1/networks/{networkId}/members/{nodeId}/events` SSE 连接；在管理页面修改 Member name，检查 App 收到更新。
+4. App PATCH 昵称，提交新名字和刚读取的版本，检查管理页面原输入框实时更新。
 
 App 接口完整文档：[nickname-api.md](nickname-api.md)。
 
-1.1.0 新增设备查询同网络成员昵称的接口：`GET /api/v1/networks/{networkId}/members/nicknames`（批量）和 `GET /api/v1/networks/{networkId}/members/{nodeId}/nickname`（单个）。已有部署运行 `./deploy.sh --update` 即可安装当前本地代码，不需要重编译镜像、重生成 Planet 或重新绑定设备。先同步本版本代码；如果健康检查仍显示 1.0.0，则新接口尚未安装。
+2.0.0 移除旧版本的设备凭证、兑换流程及 `/me/` 接口，改用明确包含 Node ID 的免鉴权接口。已有部署先同步本版本代码，再运行 `./deploy.sh --update`；保留现有昵称及版本，不需要重编译镜像或重生成 Planet。确认健康检查显示 2.0.0，否则新代码尚未安装。
 
 ## 4. 为 App 提供 HTTPS 和 SSE
 
@@ -152,11 +152,11 @@ location / {
 }
 ```
 
-App 的 `baseUrl` 填 `https://你的域名`。防火墙通常继续开放 ZeroTier 通信端口，并开放 HTTPS 443；管理端口可限制为本机反向代理或受信任来源。SSE 路径与其他 API 一起代理，不能仅开放昵称 GET 而拦截绑定、PATCH 和 events。
+App 的 `baseUrl` 填 `https://你的域名` 或服务器可达的 ZeroTier 地址。管理端口可限制为本机反向代理或受信任来源。昵称接口免鉴权，若仅允许入网设备访问，需要让服务器加入该网络并通过防火墙限制来源。SSE 路径与其他 API 一起代理，不能仅开放 GET 而拦截 PATCH 和 events。
 
 ## 数据和回退
 
-- 新数据文件：容器内 `/app/config/nickname-sync.json`，默认宿主机 `data/zerotier/config/nickname-sync.json`。包含昵称和凭证哈希，应与整个 `data/zerotier/` 一起备份。
+- 新数据文件：容器内 `/app/config/nickname-sync.json`，默认宿主机 `data/zerotier/config/nickname-sync.json`。保存昵称、版本和旧数据迁移状态，应与整个 `data/zerotier/` 一起备份。旧绑定数据会清空，磁盘结构保持兼容，代码回退不会因数据格式改变而无法启动。
 - 升级前代码包：容器内 `/app/config/nickname-sync-backups/*.tar.gz`，默认宿主机 `data/zerotier/config/nickname-sync-backups/`。
 - 初次补丁的原文件另存于 ztncui `src/.nickname-sync-backups/`。
 - 自动健康检查失败会尝试回退代码；仍失败时查看容器日志。不要删除 `one/` 或重置节点身份来解决昵称接口问题。

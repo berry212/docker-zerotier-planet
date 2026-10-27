@@ -80,18 +80,14 @@ function createExtension(options) {
     next();
   }
 
-  async function device(req) {
-    ids(req.params.networkId);
-    const authorization = req.get('Authorization') || '';
-    const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
-    const credential = service.authenticate(token);
-    if (credential.networkId !== req.params.networkId) throw new ApiError(403, 'wrong_network', 'Token belongs to another network');
-    await member(credential.networkId, credential.nodeId, true);
-    service.authenticate(token); // Membership lookup may have overlapped credential revocation.
-    return {token, credential};
+  async function selectedMember(req) {
+    const {networkId, nodeId} = req.params;
+    ids(networkId, nodeId);
+    await member(networkId, nodeId, true);
+    return {networkId, nodeId};
   }
 
-  function openStream(req, res, scope, check, accepts) {
+  function openStream(req, res, scope, check, accepts, closeOnRemove) {
     if (streamCount >= 1024 || (streams.get(scope) || 0) >= 4) {
       throw new ApiError(429, 'too_many_streams', 'Close an existing SSE connection before reconnecting');
     }
@@ -109,7 +105,7 @@ function createExtension(options) {
       closed = true;
       clearInterval(heartbeat);
       service.removeListener('nickname', changed);
-      service.removeListener('binding', binding);
+      service.removeListener('removed', removed);
       const remaining = streams.get(scope) - 1;
       if (remaining) streams.set(scope, remaining); else streams.delete(scope);
       streamCount--;
@@ -134,13 +130,17 @@ function createExtension(options) {
         await check();
         if (!closed) res.write(': heartbeat\n\n');
       } catch (error) {
-        send(error.status === 503 ? 'unavailable' : 'revoked', {code: error.code || 'authentication_required'});
+        send(error.status === 503 ? 'unavailable' : 'removed', {code: error.code || 'membership_required'});
         close();
       } finally { checking = false; }
     }
-    function binding(record) { if (accepts(record)) validate(); }
+    function removed(record) {
+      if (!accepts(record)) return;
+      if (closeOnRemove) { send('removed', {code: 'membership_required'}); close(); }
+      else validate();
+    }
     service.on('nickname', changed);
-    service.on('binding', binding);
+    service.on('removed', removed);
     heartbeat = setInterval(validate, options.heartbeatMs || 25000);
     res.on('close', close);
     return {changed, close};
@@ -175,40 +175,11 @@ function createExtension(options) {
     const router = express.Router();
     router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
     router.get('/nickname-sync/health', (req, res) => res.json({status: 'ok', version}));
-    router.post('/device-bindings/redeem', asyncRoute(async (req, res) => {
-      const info = service.codeInfo(req.body.code);
-      await member(info.networkId, info.nodeId, true);
-      const binding = await service.redeem(req.body.code);
-      res.status(201).json(Object.assign(binding, {nickname: await service.get(binding.networkId, binding.nodeId)}));
-    }));
-    const me = '/networks/:networkId/me';
-    router.get(me + '/nickname', asyncRoute(async (req, res) => {
-      const {credential} = await device(req);
-      const record = await service.get(credential.networkId, credential.nodeId);
-      const etag = '"nickname-' + record.version + '"';
-      res.set('ETag', etag);
-      if (req.get('If-None-Match') === etag) return res.status(304).end();
-      res.json(record);
-    }));
-    router.patch(me + '/nickname', asyncRoute(async (req, res) => {
-      const {credential, token} = await device(req);
-      res.json(await service.update(credential.networkId, credential.nodeId, req.body.nickname,
-        req.body.expectedVersion, 'device', token));
-    }));
-    router.get(me + '/events', asyncRoute(async (req, res) => {
-      const {credential, token} = await device(req);
-      const {networkId, nodeId} = credential;
-      const stream = openStream(req, res, 'device:' + token, () => device(req),
-        record => record.networkId === networkId && record.nodeId === nodeId);
-      try { stream.changed(await service.get(networkId, nodeId)); } catch (error) { stream.close(); throw error; }
-    }));
     const directory = '/networks/:networkId/members';
     router.get(directory + '/nicknames', asyncRoute(async (req, res) => {
-      const {credential} = await device(req);
-      const networkId = credential.networkId;
+      const {networkId} = req.params;
+      ids(networkId);
       const members = await service.getMany(networkId, await authorizedMemberIds(networkId));
-      // A large lookup can overlap revocation, expiry or a membership change.
-      await device(req);
       const response = {networkId, members};
       const etag = '"members-' + crypto.createHash('sha256').update(JSON.stringify(response)).digest('hex') + '"';
       res.set('ETag', etag);
@@ -216,15 +187,23 @@ function createExtension(options) {
       res.json(response);
     }));
     router.get(directory + '/:nodeId/nickname', asyncRoute(async (req, res) => {
-      const {credential} = await device(req);
-      ids(credential.networkId, req.params.nodeId);
-      const target = await memberDetail(credential.networkId, req.params.nodeId);
-      if (!target || target.id !== req.params.nodeId || target.authorized !== true) {
-        throw new ApiError(404, 'member_not_found', 'Authorized member not found in this network');
-      }
-      const record = await service.get(credential.networkId, req.params.nodeId);
-      await device(req);
+      const {networkId, nodeId} = await selectedMember(req);
+      const record = await service.get(networkId, nodeId);
+      await selectedMember(req);
+      const etag = '"nickname-' + record.version + '"';
+      res.set('ETag', etag);
+      if (req.get('If-None-Match') === etag) return res.status(304).end();
       res.json(record);
+    }));
+    router.patch(directory + '/:nodeId/nickname', asyncRoute(async (req, res) => {
+      const {networkId, nodeId} = await selectedMember(req);
+      res.json(await service.update(networkId, nodeId, req.body.nickname, req.body.expectedVersion, 'device', () => selectedMember(req)));
+    }));
+    router.get(directory + '/:nodeId/events', asyncRoute(async (req, res) => {
+      const {networkId, nodeId} = await selectedMember(req);
+      const stream = openStream(req, res, 'member:' + networkId + ':' + nodeId, () => selectedMember(req),
+        record => record.networkId === networkId && record.nodeId === nodeId, true);
+      try { stream.changed(await service.get(networkId, nodeId)); } catch (error) { stream.close(); throw error; }
     }));
     const adminBase = '/admin/networks/:networkId';
     router.use('/admin', admin);
@@ -239,14 +218,6 @@ function createExtension(options) {
     }));
     router.patch(adminBase + '/members/:nodeId/nickname', asyncRoute(async (req, res) => {
       res.json(await service.update(req.params.networkId, req.params.nodeId, req.body.nickname, req.body.expectedVersion, 'admin'));
-    }));
-    router.post(adminBase + '/members/:nodeId/binding-code', asyncRoute(async (req, res) => {
-      await member(req.params.networkId, req.params.nodeId, true);
-      res.status(201).json(await service.createCode(req.params.networkId, req.params.nodeId));
-    }));
-    router.delete(adminBase + '/members/:nodeId/binding', asyncRoute(async (req, res) => {
-      await service.revoke(req.params.networkId, req.params.nodeId, false);
-      res.status(204).end();
     }));
     router.get(adminBase + '/events', asyncRoute(async (req, res) => {
       ids(req.params.networkId);
@@ -268,7 +239,7 @@ function createExtension(options) {
     }));
     app.use('/api/v1', router);
     app.use('/api/v1', errorHandler);
-    // The browser uses its ztncui session; device tokens never appear in a URL.
+    // The existing admin page keeps its normal session; App routes need no login.
     app.get('/nickname-sync/browser.js', (req, res) => res.sendFile(path.join(__dirname, 'browser.js')));
   }
 

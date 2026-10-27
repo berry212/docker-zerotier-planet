@@ -15,7 +15,6 @@ class ApiError extends Error {
 }
 
 const keyFor = (networkId, nodeId) => networkId + ':' + nodeId;
-const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const secret = () => crypto.randomBytes(32).toString('hex');
 const emptyState = () => ({schema: 1, records: {}, codes: {}, tokens: {}, suppressedLegacy: {}});
 
@@ -50,6 +49,24 @@ class NicknameStore extends EventEmitter {
     } catch (error) {
       if (error.code !== 'ENOENT') throw error; // Never overwrite a corrupt store.
       this.state = emptyState();
+    }
+    // Keep the on-disk schema compatible with automatic code rollback, but
+    // discard obsolete binding data. Nicknames and their versions survive.
+    if (Object.keys(this.state.codes).length || Object.keys(this.state.tokens).length) {
+      this.state.codes = {};
+      this.state.tokens = {};
+      const temporary = filename + '.' + secret() + '.tmp';
+      try {
+        const file = fs.openSync(temporary, 'wx', 0o600);
+        try { fs.writeFileSync(file, JSON.stringify(this.state)); fs.fsyncSync(file); }
+        finally { fs.closeSync(file); }
+        fs.renameSync(temporary, filename);
+        const directory = fs.openSync(path.dirname(filename), 'r');
+        try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+      } catch (error) {
+        try { fs.unlinkSync(temporary); } catch (_) {}
+        throw error;
+      }
     }
   }
 
@@ -115,18 +132,13 @@ class NicknameStore extends EventEmitter {
     });
   }
 
-  async update(networkId, nodeId, nickname, expectedVersion, updatedBy, token) {
+  async update(networkId, nodeId, nickname, expectedVersion, updatedBy, checkMember) {
     nickname = validateNickname(nickname);
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
       throw new ApiError(400, 'invalid_version', 'expectedVersion must be a nonnegative integer');
     }
     const result = await this.transaction(async state => {
-      if (updatedBy === 'device') {
-        const credential = this.authenticate(token, state);
-        if (credential.networkId !== networkId || credential.nodeId !== nodeId) {
-          throw new ApiError(403, 'wrong_member', 'Token belongs to another member');
-        }
-      }
+      if (checkMember) await checkMember();
       const current = await this.record(state, networkId, nodeId);
       if (current.version !== expectedVersion) {
         throw new ApiError(409, 'version_conflict', 'Nickname changed; fetch the current value before retrying', {current});
@@ -141,72 +153,12 @@ class NicknameStore extends EventEmitter {
     return result.record;
   }
 
-  prune(state) {
-    const now = Date.now();
-    for (const bucket of [state.codes, state.tokens]) {
-      for (const key of Object.keys(bucket)) if (bucket[key].expiresAt <= now) delete bucket[key];
-    }
-  }
-
-  createCode(networkId, nodeId) {
-    const code = secret();
-    return this.transaction(state => {
-      this.prune(state);
-      for (const key of Object.keys(state.codes)) {
-        const entry = state.codes[key];
-        if (entry.networkId === networkId && entry.nodeId === nodeId) delete state.codes[key];
-      }
-      const expiresAt = Date.now() + 10 * 60 * 1000;
-      state.codes[hash(code)] = {networkId, nodeId, expiresAt};
-      return {code, networkId, nodeId, expiresAt: new Date(expiresAt).toISOString()};
-    });
-  }
-
-  codeInfo(code) {
-    const entry = typeof code === 'string' && /^[a-f0-9]{64}$/.test(code) && this.state.codes[hash(code)];
-    if (!entry || entry.expiresAt <= Date.now()) throw new ApiError(401, 'invalid_binding_code', 'Binding code is invalid or expired');
-    return Object.assign({}, entry);
-  }
-
-  async redeem(code) {
-    const token = secret();
-    const result = await this.transaction(state => {
-      this.prune(state);
-      const entry = typeof code === 'string' && state.codes[hash(code)];
-      if (!entry) throw new ApiError(401, 'invalid_binding_code', 'Binding code is invalid or expired');
-      delete state.codes[hash(code)];
-      // A new binding replaces the old device credential.
-      for (const key of Object.keys(state.tokens)) {
-        if (state.tokens[key].networkId === entry.networkId && state.tokens[key].nodeId === entry.nodeId) delete state.tokens[key];
-      }
-      const expiresAt = Date.now() + 90 * 24 * 60 * 60 * 1000;
-      state.tokens[hash(token)] = {networkId: entry.networkId, nodeId: entry.nodeId, expiresAt};
-      return {token, networkId: entry.networkId, nodeId: entry.nodeId, expiresAt: new Date(expiresAt).toISOString()};
-    });
-    this.emit('binding', {networkId: result.networkId, nodeId: result.nodeId});
-    return result;
-  }
-
-  authenticate(token, state) {
-    state = state || this.state;
-    const entry = typeof token === 'string' && /^[a-f0-9]{64}$/.test(token) && state.tokens[hash(token)];
-    if (!entry || entry.expiresAt <= Date.now()) throw new ApiError(401, 'invalid_token', 'Device token is invalid, revoked or expired');
-    return Object.assign({}, entry);
-  }
-
-  async revoke(networkId, nodeId, remove) {
+  async remove(networkId, nodeId) {
     await this.transaction(state => {
-      for (const bucket of [state.codes, state.tokens]) {
-        for (const key of Object.keys(bucket)) {
-          if (bucket[key].networkId === networkId && bucket[key].nodeId === nodeId) delete bucket[key];
-        }
-      }
-      if (remove) {
-        delete state.records[keyFor(networkId, nodeId)];
-        state.suppressedLegacy[keyFor(networkId, nodeId)] = true;
-      }
+      delete state.records[keyFor(networkId, nodeId)];
+      state.suppressedLegacy[keyFor(networkId, nodeId)] = true;
     });
-    this.emit('binding', {networkId, nodeId});
+    this.emit('removed', {networkId, nodeId});
     return '';
   }
 
