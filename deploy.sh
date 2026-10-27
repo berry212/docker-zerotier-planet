@@ -1,13 +1,92 @@
 #!/bin/bash
 
-CONTAINER_NAME="myztplanet"
-ZEROTIER_PATH="$(pwd)/data/zerotier"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONTAINER_NAME="${CONTAINER_NAME:-myztplanet}"
+ZEROTIER_PATH="${ZEROTIER_DATA_PATH:-${SCRIPT_DIR}/data/zerotier}"
 CONFIG_PATH="${ZEROTIER_PATH}/config"
 DIST_PATH="${ZEROTIER_PATH}/dist"
 ZTNCUI_PATH="${ZEROTIER_PATH}/ztncui"
 DOCKER_IMAGE_THRID="xubiaolin/zerotier-planet:latest"
 DOCKER_IMAGE_SRC="xubiaolin/zerotier-planet:latest"
 DOCKER_IMAGE=$DOCKER_IMAGE_THRID
+
+# Install the extension directly into the mounted ztncui tree, including containers
+# created from older upstream images. Never replace ZeroTier identity/network data.
+sync_nickname_service() {
+    local src="/app/ztncui/src"
+    local staging="${src}/.nickname-sync-stage-$(date +%s)-$$"
+    local backup="/app/config/nickname-sync-backups/$(date +%Y%m%d-%H%M%S)-$$.tar.gz"
+    local ready=false
+
+    if [ ! -f "${SCRIPT_DIR}/patch/nickname-sync/install.js" ]; then
+        echo "缺少昵称服务源码，请上传或克隆完整项目目录。" >&2
+        return 1
+    fi
+    if ! docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        echo "容器 ${CONTAINER_NAME} 不存在，请先安装。" >&2
+        return 1
+    fi
+    if [ "$(docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}")" != "true" ]; then
+        docker start "${CONTAINER_NAME}" >/dev/null || return 1
+    fi
+    echo "正在安装/更新昵称同步服务，保留现有身份、网络和管理配置…"
+    for ((attempt=0; attempt<30; attempt++)); do
+        if docker exec "${CONTAINER_NAME}" sh -c 'test -f "$1/views/network_detail.pug" && test -f "$1/.env"' sh "$src" >/dev/null 2>&1; then
+            ready=true
+            break
+        fi
+        sleep 2
+    done
+    if [ "$ready" != true ]; then
+        echo "ztncui 尚未初始化，请检查 docker logs ${CONTAINER_NAME} 后重试。" >&2
+        return 1
+    fi
+    docker exec "${CONTAINER_NAME}" sh -c '
+        mkdir -p /app/config/nickname-sync-backups && chmod 700 /app/config/nickname-sync-backups || exit 1
+        cd "$1" || exit 1
+        if [ -d nickname-sync ]; then
+            tar -czf "$2" app.js controllers/networkController.js views/network_detail.pug nickname-sync
+        else
+            tar -czf "$2" app.js controllers/networkController.js views/network_detail.pug
+        fi
+    ' sh "$src" "$backup" || return 1
+
+    if ! docker cp "${SCRIPT_DIR}/patch/nickname-sync" "${CONTAINER_NAME}:${staging}" ||
+       ! docker exec "${CONTAINER_NAME}" node "${staging}/install.js" "$src"; then
+        docker exec "${CONTAINER_NAME}" sh -c 'rm -rf "$1"' sh "$staging" >/dev/null 2>&1
+        echo "更新失败，未重启服务。代码备份：${backup}" >&2
+        return 1
+    fi
+    if docker exec "${CONTAINER_NAME}" sh -c 'rm -rf "$1/nickname-sync" && mv "$2" "$1/nickname-sync"' sh "$src" "$staging" &&
+       docker restart "${CONTAINER_NAME}" >/dev/null; then
+        for ((attempt=0; attempt<30; attempt++)); do
+            if docker exec "${CONTAINER_NAME}" node -e '
+                const fs = require("fs"), http = require("http");
+                const port = Number(fs.readFileSync("/app/config/ztncui.port", "utf8").trim());
+                const req = http.get({host: "127.0.0.1", port, path: "/api/v1/nickname-sync/health"}, res => {
+                    let body = ""; res.on("data", data => body += data);
+                    res.on("end", () => {
+                        try { process.exit(res.statusCode === 200 && JSON.parse(body).status === "ok" ? 0 : 1); }
+                        catch (_) { process.exit(1); }
+                    });
+                });
+                req.setTimeout(2000, () => req.destroy()); req.on("error", () => process.exit(1));
+            ' >/dev/null 2>&1; then
+                echo "昵称同步服务已更新。健康检查：/api/v1/nickname-sync/health"
+                echo "App 接口文档：${SCRIPT_DIR}/docs/nickname-api.md"
+                echo "更新前的代码备份（容器内）：${backup}"
+                return 0
+            fi
+            sleep 2
+        done
+    fi
+    echo "服务健康检查失败，正在恢复更新前的管理端代码…" >&2
+    if docker exec "${CONTAINER_NAME}" sh -c 'rm -rf "$1/nickname-sync" && tar -xzf "$2" -C "$1"' sh "$src" "$backup"; then
+        docker restart "${CONTAINER_NAME}" >/dev/null || true
+    fi
+    echo "请检查 docker logs ${CONTAINER_NAME}。备份：${backup}" >&2
+    return 1
+}
 print_message() {
     local message=$1
     local color_code=$2
@@ -124,23 +203,26 @@ install() {
     check_proxy
     
     if docker inspect ${CONTAINER_NAME} &>/dev/null; then
-        echo "容器${CONTAINER_NAME}已经存在"
-        read -p "是否更新版本?(y/n) " update_version
-        if [[ "$update_version" =~ ^[Yy]$ ]]; then
-            upgrade
-            exit 0
-        fi
+        sync_nickname_service
+        return $?
     fi
 
-    echo "开始安装，如果你已经安装了，将会删除旧的数据，10秒后开始安装..."
+    if [ -d "${ZEROTIER_PATH}" ] && [ -n "$(ls -A "${ZEROTIER_PATH}")" ]; then
+        if [ -f "${ZEROTIER_PATH}/one/identity.secret" ]; then
+            echo "发现已有 ZeroTier 数据，使用已有配置恢复容器，保留数据。"
+            install_from_config
+            return $?
+        fi
+        echo "数据目录非空但缺少节点身份，停止安装以避免覆盖，请检查或指定新的 ZEROTIER_DATA_PATH。" >&2
+        return 1
+    fi
+
+    echo "开始首次安装，10秒后继续…"
 
     
     sleep 10
 
     install_lsof
-
-    docker rm -f ${CONTAINER_NAME} || true
-    rm -rf ${ZEROTIER_PATH}
 
     ZT_PORT=$(read_port "请输入zerotier-planet要使用的端口号，例如9994: ")
     API_PORT=$(read_port "请输入zerotier-planet的API端口号，例如3443: ")
@@ -183,7 +265,9 @@ install() {
         -v ${ZEROTIER_PATH}/one:/var/lib/zerotier-one \
         -v ${CONFIG_PATH}:/app/config \
         --restart unless-stopped \
-        ${DOCKER_IMAGE}
+        ${DOCKER_IMAGE} || return 1
+
+    sync_nickname_service || return 1
 
     sleep 10
 
@@ -210,6 +294,13 @@ install_from_config() {
         echo "配置文件目录不存在或为空，请先上传配置文件"
         exit 1
     fi
+
+    for config_file in ip_addr4 ip_addr6 ztncui.port file_server.port zerotier-one.port; do
+        if [ ! -f "${CONFIG_PATH}/${config_file}" ]; then
+            echo "缺少配置 ${CONFIG_PATH}/${config_file}，未创建容器。" >&2
+            return 1
+        fi
+    done
 
     extract_config() {
         local config_name=$1
@@ -250,7 +341,9 @@ install_from_config() {
         -v ${ZEROTIER_PATH}/one:/var/lib/zerotier-one \
         -v ${CONFIG_PATH}:/app/config \
         --restart unless-stopped \
-        ${DOCKER_IMAGE}
+        ${DOCKER_IMAGE} || return 1
+
+    sync_nickname_service
 }
 
 upgrade() {
@@ -259,12 +352,13 @@ upgrade() {
         exit 1
     fi
 
-    docker pull ${DOCKER_IMAGE}
+    docker pull ${DOCKER_IMAGE} || return 1
     new_image_id=$(docker inspect ${DOCKER_IMAGE} --format='{{.Id}}')
     old_image_id=$(docker inspect ${CONTAINER_NAME} --format='{{.Image}}')
     if [ "$new_image_id" == "$old_image_id" ]; then
-        print_message "当前版本已经是最新版本" "32"
-        exit 0
+        print_message "基础镜像已经是最新版本，继续更新昵称同步服务" "32"
+        sync_nickname_service
+        return $?
     else
         echo "发现新版本，开始升级...new_image_id:${new_image_id},old_image_id:${old_image_id}"
         echo "更新可能存在风险，请手动备份data目录中的数据,谨慎操作"
@@ -372,4 +466,31 @@ menu() {
     esac
 }
 
-menu
+case "${1:-}" in
+    --update)
+        sync_nickname_service
+        ;;
+    --install)
+        install
+        ;;
+    --menu)
+        menu
+        ;;
+    --help|-h)
+        echo "用法：./deploy.sh [--update|--install|--menu]"
+        echo "无参数：已有容器自动更新昵称服务；未安装时显示安装菜单。"
+        echo "--update：仅更新昵称服务并检查健康状态，不拉取基础镜像。"
+        echo "--menu：显示原有运维菜单；菜单 3 可升级基础镜像。"
+        ;;
+    '')
+        if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+            sync_nickname_service
+        else
+            menu
+        fi
+        ;;
+    *)
+        echo "未知参数：$1。使用 --help 查看帮助。" >&2
+        exit 1
+        ;;
+esac

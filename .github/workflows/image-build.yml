@@ -10,12 +10,15 @@ on:
 
 jobs:
   check-and-build:
+    # Fork pushes only run tests. Publishing a fork image requires an explicit
+    # workflow_dispatch and configured DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD.
+    if: github.repository == 'xubiaolin/docker-zerotier-planet' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Get latest Tailscale tag
+      - name: Get latest ZeroTier tag
         id: get_tag
         run: |
           LATEST_TAG=$(curl -s https://api.github.com/repos/zerotier/ZeroTierOne/tags | jq -r '.[0].name')
@@ -40,4 +43,4 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/zerotier-planet-test:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/zerotier-planet-test:${{ steps.get_tag.outputs.latest_tag }}
           build-args: |
-            TAG=${{ steps.get_tag.outputs.latest_tag }} 
+            TAG=${{ steps.get_tag.outputs.latest_tag }}

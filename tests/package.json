@@ -1,0 +1,6 @@
+{
+  "name": "zerotier-nickname-sync-tests",
+  "private": true,
+  "scripts": {"test": "node --test *.test.js"},
+  "devDependencies": {"express": "4.22.1", "express-session": "1.19.0", "pug": "3.0.3", "node-persist": "2.1.0", "ip-address": "5.9.4"}
+}

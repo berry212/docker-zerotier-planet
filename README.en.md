@@ -1,5 +1,9 @@
 # Docker ZeroTier Planet
 
+This checkout includes App nickname synchronization on the existing ztncui port. On an existing deployment, running `./deploy.sh` automatically backs up and updates the extension, restarts the container and checks its health. Use `./deploy.sh --menu` for the original operations menu, or `--install` for a new installation. Data paths now default to the script directory and may be overridden with `ZEROTIER_DATA_PATH`.
+
+See [target-server deployment instructions](docs/deployment.md) and the [App API contract](docs/nickname-api.md) (Chinese). Deploy from `berry212/docker-zerotier-planet`; this fork includes the nickname extension. Nickname updates require device-scoped Bearer credentials obtained using a one-time binding code, and support SSE notifications.
+
 [简体中文](README.md) · [English](README.en.md)
 
 Deploy your own ZeroTier Planet on a Linux server with Docker. The deployment also provides a web-based network management interface and a download service for `planet` and `moon` files. It is intended for users who want to manage their own ZeroTier root node and networks.
@@ -63,7 +67,7 @@ Allow the ports you actually use through both the server firewall and your cloud
 ### 2. Run the Deployment Script
 
 ```bash
-git clone https://github.com/xubiaolin/docker-zerotier-planet.git
+git clone https://github.com/berry212/docker-zerotier-planet.git
 cd docker-zerotier-planet
 ./deploy.sh
 ```
@@ -72,9 +76,9 @@ Select **1. Install** and enter the ZeroTier, management interface, and file dow
 
 The deployment script creates a container with `docker run`; this repository does not include a Compose configuration file.
 
-**Do not choose Install again on an existing deployment without a backup: it deletes `data/zerotier/` under the current project directory. Choose Update for an upgrade.** If the image cannot be pulled, check Docker's access to the image registry before replacing any existing Docker configuration on your server.
+**Back up existing data before updating.** An existing container receives the nickname extension update; if only identity data remains, the installer restores the container from its saved configuration. Use `./deploy.sh --menu` to upgrade the base image. If the image cannot be pulled, check Docker's access to the image registry before replacing any existing Docker configuration on your server.
 
-Run the script from the project directory: its data paths are based on your current working directory.
+Data paths default to the script directory and can be overridden using an absolute `ZEROTIER_DATA_PATH`.
 
 After deployment, check the container and its logs:
 
@@ -163,7 +167,7 @@ The deployment script mounts the following host directories into the container. 
 | `data/zerotier/one/` | ZeroTier identity and controller data |
 | `data/zerotier/config/` | Configuration and keys used to generate the Planet |
 
-**Back up before updating.** Choosing Update in `./deploy.sh` retains mounted data but recreates the container. Watch for the data-deletion warning before choosing Install again; it is not a lossless upgrade. When the data directory is nonempty, the deployment does not automatically regenerate `planet` / `moon`: **changing an IP address or port environment variable alone will not update the generated node information or client files.**
+**Back up before updating.** Choosing Update in `./deploy.sh --menu` retains mounted data but recreates the container. Running `./deploy.sh` directly only updates the local nickname extension and restarts the existing container. Existing identity data is preserved. When the data directory is nonempty, the deployment does not automatically regenerate `planet` / `moon`: **changing an IP address or port environment variable alone will not update the generated node information or client files.**
 
 ### Protect the Management and Download Endpoints
 
@@ -231,7 +235,7 @@ services:
 
 ### Uninstall
 
-Run `./deploy.sh` from the project directory and select Uninstall from the menu. If you manage the container manually, you can run `docker rm -f myztplanet`; **this removes the container, not the host's `data/zerotier/` directory**. Inspect and back up the directory before deleting its contents.
+Run `./deploy.sh --menu` from the project directory and select Uninstall from the menu. If you manage the container manually, you can run `docker rm -f myztplanet`; **this removes the container, not the host's `data/zerotier/` directory**. Inspect and back up the directory before deleting its contents.
 
 ## FAQ
 
@@ -257,7 +261,7 @@ Back up all of `data/zerotier/`, plan the redeployment, generate a `planet` file
 
 ### What if I forget the management password?
 
-Run `./deploy.sh` from the project directory and select Reset Password from the menu. The script restores the default password, `password`, and restarts the container; change it immediately after signing in. Do not delete `data/zerotier/` to reset a password—it also contains node and network data.
+Run `./deploy.sh --menu` from the project directory and select Reset Password from the menu. The script restores the default password, `password`, and restarts the container; change it immediately after signing in. Do not delete `data/zerotier/` to reset a password—it also contains node and network data.
 
 ### Are custom domains and ARM servers supported?
 

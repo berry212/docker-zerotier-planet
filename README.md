@@ -63,18 +63,18 @@
 ### 2. 运行部署脚本
 
 ```bash
-git clone https://github.com/xubiaolin/docker-zerotier-planet.git
+git clone https://github.com/berry212/docker-zerotier-planet.git
 cd docker-zerotier-planet
 ./deploy.sh
 ```
 
-按提示选择 **1. 安装**，依次填写 ZeroTier、管理界面和文件下载端口，并选择自动获取或手动填写服务器公网 IP。
+首次部署按提示选择 **1. 安装**，依次填写 ZeroTier、管理界面和文件下载端口，并选择自动获取或手动填写服务器公网 IP。已有容器时，无参数执行 `./deploy.sh` 会自动更新昵称同步扩展；原运维菜单改用 `./deploy.sh --menu`。
 
 部署脚本使用 `docker run` 创建容器；仓库没有自带的 Compose 配置文件。
 
-**已有部署不要直接选择重新安装：该流程会删除当前项目目录下的 `data/zerotier/`，请先备份，升级请选“更新”。**若镜像拉取失败，先确认 Docker 可以访问镜像仓库，不要直接覆盖服务器现有的 Docker 配置。
+**已有部署先备份完整数据。**检测到已有容器时安装入口更新昵称扩展；已有 `one/` 数据但没有容器时使用原配置恢复，不重建身份。升级基础镜像使用 `./deploy.sh --menu` 的“更新”。若镜像拉取失败，先确认 Docker 可以访问镜像仓库，不要直接覆盖服务器现有的 Docker 配置。
 
-请在项目目录运行脚本：数据路径按当前工作目录计算。
+数据路径默认按脚本所在目录计算；可用绝对路径环境变量 `ZEROTIER_DATA_PATH` 自定义。
 
 部署后可检查容器和日志：
 
@@ -152,6 +152,18 @@ sudo zerotier-cli peers
 
 ## 运维与安全
 
+### App 昵称双向同步
+
+昵称同步扩展与 ztncui 共用管理端口：App 可以读取、修改自己的昵称，管理员也可以在成员页面改名，通过 SSE 实时通知双方。昵称按网络和节点分别保存，不需要改 ZeroTier 协议或重新生成 `planet`。
+
+将本次修改后的完整代码上传到**目标服务器的原项目目录**，保留原来的 `data/`，然后执行 `./deploy.sh`。已有容器会自动备份管理端代码、安装扩展、重启并检查健康状态。此操作不更新基础镜像；失败时尝试回退代码。
+
+- [在目标服务器部署、升级和配置 HTTPS](docs/deployment.md)
+- [交给 App 开发者的 API 文档](docs/nickname-api.md)
+- 读取昵称：`GET /api/v1/networks/{networkId}/me/nickname`，需要设备 Bearer 凭证。
+- 实时同步：`GET /api/v1/networks/{networkId}/me/events`。
+- 在成员行点击“绑定 App”，将一次性绑定码交给对应设备；App 兑换后获得自己的凭证，不使用管理员密码或 ZeroTier 控制器令牌。
+
 ### 数据目录与备份
 
 部署脚本将以下宿主机目录挂载进容器；备份时应保留整个 `data/zerotier/`，而不只是 `planet` 文件：
@@ -163,7 +175,7 @@ sudo zerotier-cli peers
 | `data/zerotier/one/` | ZeroTier 身份与控制器数据 |
 | `data/zerotier/config/` | 生成 Planet 所需的配置和密钥 |
 
-**更新前先备份。**运行 `./deploy.sh` 并选择“更新”会保留已挂载的数据，但会重建容器；选择重新“安装”前要特别注意数据清理提示，不能把它当作无损升级。部署脚本在数据目录已有内容时不会自动重新生成 `planet` / `moon`；**只修改 IP 或端口环境变量，不会更新已生成的节点信息和客户端文件。**
+**更新前先备份。**运行 `./deploy.sh --menu` 并选择“更新”会保留已挂载的数据，但会重建容器；直接运行 `./deploy.sh` 仅安装/更新本地昵称扩展并重启现有容器。部署脚本在数据目录已有内容时不会自动重新生成 `planet` / `moon`；**只修改 IP 或端口环境变量，不会更新已生成的节点信息和客户端文件。**
 
 ### 保护管理界面和下载入口
 
@@ -231,7 +243,7 @@ services:
 
 ### 卸载
 
-在项目目录运行 `./deploy.sh`，根据菜单提示选择“卸载”。若手动管理容器，可执行 `docker rm -f myztplanet`；**这只删除容器，不等于清除宿主机的 `data/zerotier/` 数据**。删除数据前请先核实目录内容并完成备份。
+在项目目录运行 `./deploy.sh --menu`，根据菜单提示选择“卸载”。若手动管理容器，可执行 `docker rm -f myztplanet`；**这只删除容器，不等于清除宿主机的 `data/zerotier/` 数据**。删除数据前请先核实目录内容并完成备份。
 
 ## 常见问题
 
@@ -257,7 +269,7 @@ services:
 
 ### 忘记管理密码怎么办？
 
-在项目目录运行 `./deploy.sh`，选择菜单中的“重置密码”。脚本会将管理界面密码恢复为默认值 `password` 并重启容器；登录后立即更换密码。不要为重置密码删除 `data/zerotier/`，其中还保存着节点和网络数据。
+在项目目录运行 `./deploy.sh --menu`，选择菜单中的“重置密码”。脚本会将管理界面密码恢复为默认值 `password` 并重启容器；登录后立即更换密码。不要为重置密码删除 `data/zerotier/`，其中还保存着节点和网络数据。
 
 ### 支持域名或 ARM 服务器吗？
 

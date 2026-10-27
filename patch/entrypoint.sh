@@ -122,4 +122,9 @@ function check_ztncui() {
 check_file_server
 check_zerotier
 check_ztncui
+# Update mounted application code as well as fresh installations. No extra npm packages.
+if [ ! -f "${ZTNCUI_SRC_PATH}/nickname-sync/index.js" ]; then
+    cp -R /bak/nickname-sync "${ZTNCUI_SRC_PATH}/" || exit 1
+fi
+node "${ZTNCUI_SRC_PATH}/nickname-sync/install.js" "${ZTNCUI_SRC_PATH}" || exit 1
 start

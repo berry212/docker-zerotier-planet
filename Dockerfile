@@ -73,6 +73,7 @@ COPY --from=builder /var/lib/zerotier-one /bak/zerotier-one
 COPY --from=builder /app/ZeroTierOne/zerotier-one /usr/sbin/zerotier-one
 COPY --from=builder /app/entrypoint.sh /app/entrypoint.sh
 COPY --from=builder /app/http_server.js /app/http_server.js
+COPY ./patch/nickname-sync /bak/nickname-sync
 
 RUN set -x \
     && apk update \
