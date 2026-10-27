@@ -101,6 +101,20 @@ class NicknameStore extends EventEmitter {
     return this.transaction(async state => Object.assign({}, await this.record(state, networkId, nodeId)));
   }
 
+  async getMany(networkId, nodeIds) {
+    await this.queue;
+    if (nodeIds.every(nodeId => this.state.records[keyFor(networkId, nodeId)])) {
+      return nodeIds.map(nodeId => Object.assign({}, this.state.records[keyFor(networkId, nodeId)]));
+    }
+    // Import names for an entire member list with one durable write, including
+    // devices that have never opened the App or the ztncui member page.
+    return this.transaction(async state => {
+      const records = [];
+      for (const nodeId of nodeIds) records.push(Object.assign({}, await this.record(state, networkId, nodeId)));
+      return records;
+    });
+  }
+
   async update(networkId, nodeId, nickname, expectedVersion, updatedBy, token) {
     nickname = validateNickname(nickname);
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {

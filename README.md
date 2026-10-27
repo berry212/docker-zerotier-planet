@@ -161,6 +161,7 @@ sudo zerotier-cli peers
 - [在目标服务器部署、升级和配置 HTTPS](docs/deployment.md)
 - [交给 App 开发者的 API 文档](docs/nickname-api.md)
 - 读取昵称：`GET /api/v1/networks/{networkId}/me/nickname`，需要设备 Bearer 凭证。
+- 读取同网络已授权成员昵称（服务版本 1.1.0 起）：`GET /api/v1/networks/{networkId}/members/nicknames`，沿用自己的设备凭证；也可用 `/members/{nodeId}/nickname` 查询单个成员。
 - 实时同步：`GET /api/v1/networks/{networkId}/me/events`。
 - 在成员行点击“绑定 App”，将一次性绑定码交给对应设备；App 兑换后获得自己的凭证，不使用管理员密码或 ZeroTier 控制器令牌。
 

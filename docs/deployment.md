@@ -28,7 +28,7 @@ git merge --ff-only berry212/master
 如果使用本次提供的发布包，在开发电脑执行（替换服务器地址和用户名）：
 
 ```bash
-scp dist/zerotier-nickname-sync-1.0.0.tar.gz root@SERVER_IP:/tmp/
+scp dist/zerotier-nickname-sync-1.1.0.tar.gz root@SERVER_IP:/tmp/
 ```
 
 发布包包含代码和文档，不包含开发依赖、Git 历史、任何 `data/` 或凭据。
@@ -56,7 +56,7 @@ docker start myztplanet
 解压代码包到当前目录，然后执行：
 
 ```bash
-tar -xzf /tmp/zerotier-nickname-sync-1.0.0.tar.gz --strip-components=1
+tar -xzf /tmp/zerotier-nickname-sync-1.1.0.tar.gz --strip-components=1
 chmod +x deploy.sh
 ./deploy.sh
 ```
@@ -91,7 +91,7 @@ CONTAINER_NAME=你的容器名称 ./deploy.sh --update
 ```bash
 ssh root@SERVER_IP
 mkdir -p /opt
-tar -xzf /tmp/zerotier-nickname-sync-1.0.0.tar.gz -C /opt
+tar -xzf /tmp/zerotier-nickname-sync-1.1.0.tar.gz -C /opt
 cd /opt/docker-zerotier-planet
 chmod +x deploy.sh
 ./deploy.sh --install
@@ -119,7 +119,7 @@ docker logs --tail 100 myztplanet
 预期健康响应：
 
 ```json
-{"status":"ok","version":"1.0.0"}
+{"status":"ok","version":"1.1.0"}
 ```
 
 打开管理页面并强制刷新，在网络成员昵称下应看到“绑定 App”和“撤销绑定”。
@@ -130,6 +130,8 @@ docker logs --tail 100 myztplanet
 4. 在管理页面修改昵称，检查 App 收到 SSE 更新；在 App 改名，检查管理页面实时更新。
 
 App 接口完整文档：[nickname-api.md](nickname-api.md)。
+
+1.1.0 新增设备查询同网络成员昵称的接口：`GET /api/v1/networks/{networkId}/members/nicknames`（批量）和 `GET /api/v1/networks/{networkId}/members/{nodeId}/nickname`（单个）。已有部署运行 `./deploy.sh --update` 即可安装当前本地代码，不需要重编译镜像、重生成 Planet 或重新绑定设备。先同步本版本代码；如果健康检查仍显示 1.0.0，则新接口尚未安装。
 
 ## 4. 为 App 提供 HTTPS 和 SSE
 

@@ -2,6 +2,8 @@
 
 This checkout includes App nickname synchronization on the existing ztncui port. On an existing deployment, running `./deploy.sh` automatically backs up and updates the extension, restarts the container and checks its health. Use `./deploy.sh --menu` for the original operations menu, or `--install` for a new installation. Data paths now default to the script directory and may be overridden with `ZEROTIER_DATA_PATH`.
 
+Version 1.1.0 adds device-authenticated peer nickname queries: `GET /api/v1/networks/{networkId}/members/nicknames` (all authorized members, including offline devices) and `/members/{nodeId}/nickname` (one member). Devices can still only change their own nicknames.
+
 See [target-server deployment instructions](docs/deployment.md) and the [App API contract](docs/nickname-api.md) (Chinese). Deploy from `berry212/docker-zerotier-planet`; this fork includes the nickname extension. Nickname updates require device-scoped Bearer credentials obtained using a one-time binding code, and support SSE notifications.
 
 [简体中文](README.md) · [English](README.en.md)

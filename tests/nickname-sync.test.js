@@ -16,7 +16,7 @@ const NETWORK = '00ed8fb92f0e3547';
 const OTHER_NETWORK = '00ed8fb92f0e3548';
 const NODE = '79d0575f06';
 const OTHER_NODE = 'd484a54ba7';
-let directory, server, base, extension, members, unavailable;
+let directory, server, base, extension, members, unavailable, listingFormat, listingOverride, onListing, onMemberDetail;
 
 beforeEach(async () => {
   directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nickname-test-'));
@@ -26,6 +26,10 @@ beforeEach(async () => {
     [OTHER_NETWORK + NODE, {id: NODE, authorized: true}]
   ]);
   unavailable = false;
+  listingFormat = 'map';
+  listingOverride = undefined;
+  onListing = null;
+  onMemberDetail = null;
   const app = express();
   app.use(express.json({limit: '8kb'}));
   app.use(session({secret: 'test-only-secret', resave: false, saveUninitialized: false}));
@@ -33,13 +37,23 @@ beforeEach(async () => {
   app.post('/test/login', (req, res) => { req.session.user = {name: 'admin'}; res.json({ok: true}); });
   app.post('/test/logout', (req, res) => req.session.destroy(() => res.json({ok: true})));
   extension = createExtension({express, filename: path.join(directory, 'state.json'), heartbeatMs: 40,
-    legacyName: async id => id === NODE ? 'Chen &amp; &lt;desktop&gt;' : undefined,
+    legacyName: async id => id === NODE ? 'Chen &amp; &lt;desktop&gt;' : id === '1111111111' ? 'Unbound &amp; Desktop' : undefined,
     zt: {
       member_detail: async (network, node) => {
         if (unavailable) throw new Error('controller is down');
+        if (onMemberDetail) await onMemberDetail(network, node);
         const result = members.get(network + node);
         if (!result) { const error = new Error('not found'); error.statusCode = 404; throw error; }
         return result;
+      },
+      members: async network => {
+        if (unavailable) throw new Error('controller is down');
+        if (onListing) await onListing();
+        if (listingOverride !== undefined) return listingOverride;
+        const nodeIds = Array.from(members.keys()).filter(key => key.startsWith(network)).map(key => key.slice(16));
+        if (listingFormat === 'array-maps') return nodeIds.map(id => ({[id]: 1}));
+        if (listingFormat === 'array-ids') return nodeIds;
+        return Object.fromEntries(nodeIds.map(id => [id, 1]));
       },
       network_detail: async network => {
         if (network !== NETWORK && network !== OTHER_NETWORK) throw new Error('not found');
@@ -83,6 +97,8 @@ async function login() {
 
 const adminMember = (node, network) => '/api/v1/admin/networks/' + (network || NETWORK) + '/members/' + (node || NODE);
 const me = network => '/api/v1/networks/' + (network || NETWORK) + '/me';
+const memberNames = network => '/api/v1/networks/' + (network || NETWORK) + '/members/nicknames';
+const memberName = (node, network) => '/api/v1/networks/' + (network || NETWORK) + '/members/' + (node || OTHER_NODE) + '/nickname';
 
 async function bind(admin, node, network) {
   admin = admin || await login();
@@ -124,10 +140,144 @@ async function events(route, headers) {
 }
 
 test('health is public, nickname and admin endpoints require credentials', async () => {
-  assert.equal((await request('/api/v1/nickname-sync/health')).body.version, '1.0.0');
+  assert.equal((await request('/api/v1/nickname-sync/health')).body.version, '1.1.0');
   assert.equal((await request(me() + '/nickname')).status, 401);
   assert.equal((await request(adminMember() + '/nickname')).status, 401);
   assert.equal((await request('/api/v1/admin/session')).status, 401);
+  assert.equal((await request(memberNames())).status, 401);
+  assert.equal((await request(memberName())).status, 401);
+});
+
+test('a bound device can list all authorized members, including offline, unnamed and unbound devices', async () => {
+  members.set(NETWORK + '1111111111', {id: '1111111111', authorized: true});
+  const {token, admin} = await bind();
+  const result = await request(memberNames(), {token});
+  assert.equal(result.status, 200);
+  assert.equal(result.body.networkId, NETWORK);
+  assert.deepEqual(result.body.members.map(record => record.nodeId), ['1111111111', NODE, OTHER_NODE]);
+  assert.equal(result.body.members[0].nickname, 'Unbound & Desktop');
+  assert.equal(result.body.members[0].updatedBy, 'migration');
+  assert.equal(result.body.members[1].nickname, 'Chen & <desktop>');
+  assert.equal(result.body.members[2].nickname, '');
+  assert.equal(result.body.members[2].version, 0);
+  assert.equal(result.body.members[2].updatedAt, null);
+  for (const record of result.body.members) {
+    assert.deepEqual(Object.keys(record).sort(), ['networkId', 'nickname', 'nodeId', 'updatedAt', 'updatedBy', 'version']);
+  }
+  await request(adminMember(OTHER_NODE) + '/nickname', {method: 'PATCH', admin, body: {nickname: '同网络电脑', expectedVersion: 0}});
+  const single = await request(memberName(), {token});
+  assert.equal(single.status, 200);
+  assert.equal(single.body.nodeId, OTHER_NODE);
+  assert.equal(single.body.nickname, '同网络电脑');
+  assert.equal(single.body.updatedBy, 'admin');
+});
+
+test('member nickname queries exclude unapproved, deleted, orphaned and other-network records', async () => {
+  const {token, admin} = await bind();
+  await request(adminMember(OTHER_NODE) + '/nickname', {method: 'PATCH', admin, body: {nickname: 'hidden', expectedVersion: 0}});
+  await extension.service.update(NETWORK, 'fffffffffe', 'deleted record', 0, 'admin');
+  await extension.service.update(OTHER_NETWORK, 'ffffffffff', 'other-network record', 0, 'admin');
+  members.get(NETWORK + OTHER_NODE).authorized = false;
+  const result = await request(memberNames(), {token});
+  assert.deepEqual(result.body.members.map(record => record.nodeId), [NODE]);
+  for (const node of [OTHER_NODE, 'fffffffffe', 'ffffffffff']) {
+    const single = await request(memberName(node), {token});
+    assert.equal(single.status, 404);
+    assert.equal(single.body.error.code, 'member_not_found');
+  }
+  assert.equal((await request(memberNames(OTHER_NETWORK), {token})).status, 403);
+  assert.equal((await request(memberName(NODE, OTHER_NETWORK), {token})).status, 403);
+  assert.equal((await request(memberName('invalid'), {token})).status, 400);
+});
+
+test('device credentials can read peer names but cannot write them', async () => {
+  const {token} = await bind();
+  assert.equal((await request(memberName(), {token})).status, 200);
+  const response = await fetch(base + memberName(), {method: 'PATCH',
+    headers: {Authorization: 'Bearer ' + token, 'Content-Type': 'application/json'},
+    body: JSON.stringify({nickname: 'forbidden', expectedVersion: 0})});
+  assert.equal(response.status, 404);
+  assert.equal((await request(memberName(), {token})).body.nickname, '');
+});
+
+test('member directory supports controller map, array-of-maps and array-of-IDs formats', async () => {
+  const {token} = await bind();
+  for (listingFormat of ['map', 'array-maps', 'array-ids']) {
+    const result = await request(memberNames(), {token});
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body.members.map(record => record.nodeId), [NODE, OTHER_NODE]);
+  }
+  listingOverride = [OTHER_NODE, NODE, OTHER_NODE];
+  assert.deepEqual((await request(memberNames(), {token})).body.members.map(record => record.nodeId), [NODE, OTHER_NODE]);
+});
+
+test('a member deleted during a directory lookup is omitted rather than breaking the request', async () => {
+  const {token} = await bind();
+  onMemberDetail = async (network, node) => { if (node === OTHER_NODE) members.delete(network + node); };
+  const result = await request(memberNames(), {token});
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.members.map(record => record.nodeId), [NODE]);
+});
+
+test('directory responses recheck caller authorization and revoked tokens before sending names', async () => {
+  const {token} = await bind();
+  onListing = async () => { members.get(NETWORK + NODE).authorized = false; };
+  assert.equal((await request(memberNames(), {token})).status, 403);
+  members.get(NETWORK + NODE).authorized = true;
+  onListing = async () => { await extension.service.revoke(NETWORK, NODE, false); };
+  assert.equal((await request(memberNames(), {token})).status, 401);
+});
+
+test('single-member lookups recheck caller authorization after loading a peer', async () => {
+  const {token} = await bind();
+  onMemberDetail = async (network, node) => {
+    if (node === OTHER_NODE) members.get(NETWORK + NODE).authorized = false;
+  };
+  assert.equal((await request(memberName(), {token})).status, 403);
+});
+
+test('unauthorized callers and expired credentials cannot use member nickname queries', async () => {
+  const {token} = await bind();
+  members.get(NETWORK + NODE).authorized = false;
+  assert.equal((await request(memberNames(), {token})).status, 403);
+  assert.equal((await request(memberName(), {token})).status, 403);
+  members.get(NETWORK + NODE).authorized = true;
+  await extension.service.transaction(state => {
+    state.tokens[crypto.createHash('sha256').update(token).digest('hex')].expiresAt = 0;
+  });
+  assert.equal((await request(memberNames(), {token})).status, 401);
+  assert.equal((await request(memberName(), {token})).status, 401);
+});
+
+test('directory ETags change for nickname changes, authorization changes and deleted members', async () => {
+  const {token, admin} = await bind();
+  const first = await request(memberNames(), {token});
+  assert.equal((await request(memberNames(), {token, headers: {'If-None-Match': first.headers.get('etag')}})).status, 304);
+  await request(adminMember(OTHER_NODE) + '/nickname', {method: 'PATCH', admin, body: {nickname: 'new', expectedVersion: 0}});
+  const changed = await request(memberNames(), {token, headers: {'If-None-Match': first.headers.get('etag')}});
+  assert.equal(changed.status, 200);
+  assert.notEqual(changed.headers.get('etag'), first.headers.get('etag'));
+  members.get(NETWORK + OTHER_NODE).authorized = false;
+  const hidden = await request(memberNames(), {token, headers: {'If-None-Match': changed.headers.get('etag')}});
+  assert.equal(hidden.status, 200);
+  assert.notEqual(hidden.headers.get('etag'), changed.headers.get('etag'));
+  members.get(NETWORK + OTHER_NODE).authorized = true;
+  await request(memberNames(), {token});
+  members.delete(NETWORK + OTHER_NODE);
+  assert.equal((await request(memberNames(), {token})).body.members.length, 1);
+});
+
+test('invalid controller member listings and listing failures return 503 without partial data', async () => {
+  const {token} = await bind();
+  for (listingOverride of [null, 1, {bad: 1}, [null], [42], [['bad']]]) {
+    const result = await request(memberNames(), {token});
+    assert.equal(result.status, 503);
+    assert.equal(result.body.error.code, 'controller_unavailable');
+    assert.equal(result.body.members, undefined);
+  }
+  listingOverride = undefined;
+  onListing = async () => { throw new Error('connection failed'); };
+  assert.equal((await request(memberNames(), {token})).status, 503);
 });
 
 test('binding codes are single-use, secrets are hashed, and old names migrate as plain text', async () => {

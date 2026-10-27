@@ -22,18 +22,54 @@ function createExtension(options) {
     }
   }
 
-  async function member(networkId, nodeId, authorized) {
+  async function memberDetail(networkId, nodeId) {
     let record;
     try { record = await zt.member_detail(networkId, nodeId); } catch (error) {
       if (error.statusCode === 404 || (error.response && error.response.statusCode === 404)) {
-        throw new ApiError(403, 'membership_required', 'Device is not a member of this network');
+        return null;
       }
       throw new ApiError(503, 'controller_unavailable', 'Cannot verify membership with the ZeroTier controller');
     }
+    return record;
+  }
+
+  async function member(networkId, nodeId, authorized) {
+    const record = await memberDetail(networkId, nodeId);
     if (!record || record.id !== nodeId || (authorized && record.authorized !== true)) {
       throw new ApiError(403, 'membership_required', 'Device must be an authorized member of this network');
     }
     return record;
+  }
+
+  async function authorizedMemberIds(networkId) {
+    let listing;
+    try { listing = await zt.members(networkId); } catch (error) {
+      throw new ApiError(503, 'controller_unavailable', 'Cannot list members from the ZeroTier controller');
+    }
+    // ZeroTier versions return either an ID-to-revision map or an array of
+    // single-entry maps. Accept plain ID arrays as well.
+    const entries = Array.isArray(listing) ? listing : [listing];
+    const collected = [];
+    for (const entry of entries) {
+      if (typeof entry === 'string' && Array.isArray(listing)) collected.push(entry);
+      else if (entry && typeof entry === 'object' && !Array.isArray(entry)) collected.push(...Object.keys(entry));
+      else throw new ApiError(503, 'controller_unavailable', 'Unexpected controller member list format');
+    }
+    if (collected.some(nodeId => !/^[a-f0-9]{10}$/.test(nodeId))) {
+      throw new ApiError(503, 'controller_unavailable', 'Unexpected controller member ID');
+    }
+    const candidates = Array.from(new Set(collected)).sort();
+    const authorized = [];
+    // Bound local-controller concurrency instead of opening one request per
+    // member simultaneously. A member deleted during the lookup is omitted.
+    for (let offset = 0; offset < candidates.length; offset += 8) {
+      const batch = candidates.slice(offset, offset + 8);
+      const records = await Promise.all(batch.map(nodeId => memberDetail(networkId, nodeId)));
+      records.forEach((record, index) => {
+        if (record && record.id === batch[index] && record.authorized === true) authorized.push(batch[index]);
+      });
+    }
+    return authorized;
   }
 
   function admin(req, res, next) {
@@ -165,6 +201,30 @@ function createExtension(options) {
       const stream = openStream(req, res, 'device:' + token, () => device(req),
         record => record.networkId === networkId && record.nodeId === nodeId);
       try { stream.changed(await service.get(networkId, nodeId)); } catch (error) { stream.close(); throw error; }
+    }));
+    const directory = '/networks/:networkId/members';
+    router.get(directory + '/nicknames', asyncRoute(async (req, res) => {
+      const {credential} = await device(req);
+      const networkId = credential.networkId;
+      const members = await service.getMany(networkId, await authorizedMemberIds(networkId));
+      // A large lookup can overlap revocation, expiry or a membership change.
+      await device(req);
+      const response = {networkId, members};
+      const etag = '"members-' + crypto.createHash('sha256').update(JSON.stringify(response)).digest('hex') + '"';
+      res.set('ETag', etag);
+      if (req.get('If-None-Match') === etag) return res.status(304).end();
+      res.json(response);
+    }));
+    router.get(directory + '/:nodeId/nickname', asyncRoute(async (req, res) => {
+      const {credential} = await device(req);
+      ids(credential.networkId, req.params.nodeId);
+      const target = await memberDetail(credential.networkId, req.params.nodeId);
+      if (!target || target.id !== req.params.nodeId || target.authorized !== true) {
+        throw new ApiError(404, 'member_not_found', 'Authorized member not found in this network');
+      }
+      const record = await service.get(credential.networkId, req.params.nodeId);
+      await device(req);
+      res.json(record);
     }));
     const adminBase = '/admin/networks/:networkId';
     router.use('/admin', admin);
